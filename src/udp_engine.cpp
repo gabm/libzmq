@@ -364,69 +364,79 @@ int zmq::udp_engine_t::resolve_raw_address (char *name_, size_t length_)
     return 0;
 }
 
-void zmq::udp_engine_t::out_event ()
+void zmq::udp_engine_t::out_event()
 {
     msg_t group_msg;
-    int rc = _session->pull_msg (&group_msg);
-    errno_assert (rc == 0 || (rc == -1 && errno == EAGAIN));
-
-    if (rc == 0) {
-        msg_t body_msg;
-        rc = _session->pull_msg (&body_msg);
-        //  TODO rc is not checked here. We seem to assume rc == 0. An
-        //  assertion should be added.
-
-        const size_t group_size = group_msg.size ();
-        const size_t body_size = body_msg.size ();
-        size_t size;
-
-        if (_options.raw_socket) {
-            rc = resolve_raw_address (static_cast<char *> (group_msg.data ()),
-                                      group_size);
-
-            //  We discard the message if address is not valid
-            if (rc != 0) {
-                rc = group_msg.close ();
-                errno_assert (rc == 0);
-
-                body_msg.close ();
-                errno_assert (rc == 0);
-
-                return;
-            }
-
-            size = body_size;
-
-            memcpy (_out_buffer, body_msg.data (), body_size);
-        } else {
-            size = group_size + body_size + 1;
-
-            // TODO: check if larger than maximum size
-            _out_buffer[0] = static_cast<unsigned char> (group_size);
-            memcpy (_out_buffer + 1, group_msg.data (), group_size);
-            memcpy (_out_buffer + 1 + group_size, body_msg.data (), body_size);
+    int rc = _session->pull_msg(&group_msg);
+    errno_assert(rc == 0 || (rc == -1 && errno == EAGAIN));
+    
+    // if poll failed or the message is not the _first_ part of a multi-part message
+    // then return
+    if (rc != 0 || !(group_msg.flags () & msg_t::more)) {
+        reset_pollout(_handle);
+        return;
+    }
+    
+    msg_t body_msg;
+    rc = _session->pull_msg(&body_msg);
+    errno_assert(rc == 0 || (rc == -1 && errno == EAGAIN));
+    
+    // if poll failed or the message is not the _final_ part of a multi-part message
+    // then return
+    if (rc != 0 || (group_msg.flags () & msg_t::more)) {
+        reset_pollout(_handle);
+        return;
+    }
+    
+    const size_t group_size = group_msg.size();
+    const size_t body_size = body_msg.size();
+    size_t size;
+    
+    if (_options.raw_socket) {
+        rc = resolve_raw_address(static_cast<char*>(group_msg.data()),
+                                 group_size);
+        
+        //  We discard the message if address is not valid
+        if (rc != 0) {
+            rc = group_msg.close();
+            errno_assert(rc == 0);
+            
+            body_msg.close();
+            errno_assert(rc == 0);
+            
+            return;
         }
-
-        rc = group_msg.close ();
-        errno_assert (rc == 0);
-
-        body_msg.close ();
-        errno_assert (rc == 0);
-
-#ifdef ZMQ_HAVE_WINDOWS
-        rc = sendto (_fd, _out_buffer, static_cast<int> (size), 0, _out_address,
-                     static_cast<int> (_out_address_len));
-        wsa_assert (rc != SOCKET_ERROR);
-#elif defined ZMQ_HAVE_VXWORKS
-        rc = sendto (_fd, reinterpret_cast<caddr_t> (_out_buffer), size, 0,
-                     (sockaddr *) _out_address, (int) _out_address_len);
-        errno_assert (rc != -1);
-#else
-        rc = sendto (_fd, _out_buffer, size, 0, _out_address, _out_address_len);
-        errno_assert (rc != -1);
-#endif
-    } else
-        reset_pollout (_handle);
+        
+        size = body_size;
+        
+        memcpy(_out_buffer, body_msg.data(), body_size);
+    } else {
+        size = group_size + body_size + 1;
+        
+        // TODO: check if larger than maximum size
+        _out_buffer[0] = static_cast<unsigned char>(group_size);
+        memcpy(_out_buffer + 1, group_msg.data(), group_size);
+        memcpy(_out_buffer + 1 + group_size, body_msg.data(), body_size);
+    }
+    
+    rc = group_msg.close();
+    errno_assert(rc == 0);
+    
+    body_msg.close();
+    errno_assert(rc == 0);
+    
+    #ifdef ZMQ_HAVE_WINDOWS
+    rc = sendto(_fd, _out_buffer, static_cast<int>(size), 0, _out_address,
+                static_cast<int>(_out_address_len));
+    wsa_assert(rc != SOCKET_ERROR);
+    #elif defined ZMQ_HAVE_VXWORKS
+    rc = sendto(_fd, reinterpret_cast<caddr_t>(_out_buffer), size, 0,
+                (sockaddr*)_out_address, (int)_out_address_len);
+    errno_assert(rc != -1);
+    #else
+    rc = sendto(_fd, _out_buffer, size, 0, _out_address, _out_address_len);
+    errno_assert(rc != -1);
+    #endif
 }
 
 const char *zmq::udp_engine_t::get_endpoint () const
